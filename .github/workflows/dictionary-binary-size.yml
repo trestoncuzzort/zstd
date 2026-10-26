@@ -15,8 +15,6 @@ jobs:
         revision:
           - 49cf51799ea051457f57243527aa2058f999f005
           - ac6e2475a827ad0e373bd3844f0e2df01c781b5d
-    env:
-      REPORT_DIR: ${{ runner.temp }}/size-report-${{ matrix.revision }}
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
@@ -30,7 +28,7 @@ jobs:
         import subprocess
         import sys
 
-        directory = Path(os.environ['REPORT_DIR'])
+        directory = Path(os.environ['RUNNER_TEMP']) / 'dictionary-size-report'
         directory.mkdir()
         report = {
             'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
@@ -67,4 +65,4 @@ jobs:
       if: always()
       with:
         name: dictionary-size-${{ matrix.revision }}
-        path: ${{ env.REPORT_DIR }}
+        path: ${{ runner.temp }}/dictionary-size-report
