@@ -1,0 +1,34 @@
+# Fork-only validation of the unchanged base and source patch.
+name: dictionary-static-analysis
+
+on:
+  pull_request:
+    branches: [ dev ]
+
+permissions: read-all
+
+jobs:
+  clang-18:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        revision:
+          - 49cf51799ea051457f57243527aa2058f999f005
+          - ac6e2475a827ad0e373bd3844f0e2df01c781b5d
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ matrix.revision }}
+    - name: Install Clang 18 analyzer
+      run: |
+        sudo apt-get -qqq update
+        sudo apt-get install -y clang-18 clang-tools-18
+    - name: Analyze the upstream base and dictionary fix
+      run: make -j2 staticAnalyze CC=clang-18 SCANBUILD="scan-build-18 -o analysis"
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      if: always()
+      with:
+        name: static-analysis-${{ matrix.revision }}
+        path: analysis
+        if-no-files-found: ignore
