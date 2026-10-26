@@ -1,0 +1,109 @@
+name: dictionary-oss-fuzz
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  oss-fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, undefined, memory]
+    steps:
+    - name: Check out the exact source patch
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ac6e2475a827ad0e373bd3844f0e2df01c781b5d
+        path: zstd
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Check out the OSS-Fuzz revision used by fork CI
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        repository: google/oss-fuzz
+        ref: dec0ef9471729f77ed49c5cf0ff818538f616add
+        path: oss-fuzz
+        persist-credentials: false
+    - name: Verify source identity
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "$(git -C zstd rev-parse HEAD)" = ac6e2475a827ad0e373bd3844f0e2df01c781b5d
+        test "$(git -C oss-fuzz rev-parse HEAD)" = dec0ef9471729f77ed49c5cf0ff818538f616add
+        git -C zstd diff --exit-code
+        git -C zstd diff --cached --exit-code
+        cat > source-sha256.txt <<'EOF'
+        216fba1692333b284ffa1cfac95519464a4e8da5f99933dec7d79678d5e8f2fe  zstd/lib/compress/zstd_compress.c
+        a36c1cdba2716c62223ac1f62244861cf45e15c8748893895dbc6e4c64fd66c9  zstd/tests/fuzzer.c
+        ae077bb433eb150ee247410a0357f910b9c07be839c6a9abe0b2e6b18ceb716d  zstd/lib/common/error_private.h
+        66a8c3f71d12ea6e797e4f622f31f3f8f81c41b36f48cad4f5de7d8bfb6aac0a  zstd/lib/zstd_errors.h
+        EOF
+        sha256sum -c source-sha256.txt
+        git -C zstd show -s --format=fuller HEAD > source-commit.txt
+    - name: Build the unchanged CIFuzz builder
+      run: docker build --tag dictionary-cifuzz-build --file oss-fuzz/infra/build_fuzzers.Dockerfile oss-fuzz/infra
+    - name: Build fuzzers from the supplied checkout
+      id: build
+      shell: bash
+      env:
+        SANITIZER: ${{ matrix.sanitizer }}
+      run: |
+        set -euo pipefail
+        # InternalGithub ignores project-src-path and fetches the PR from upstream.
+        # Generic CI uses the supplied checkout with the same builder and checks.
+        docker run --rm --name dictionary-cifuzz-build \
+          --volume /var/run/docker.sock:/var/run/docker.sock \
+          --volume "$GITHUB_WORKSPACE:/github/workspace" \
+          --workdir /github/workspace \
+          --env CFL_PLATFORM=generic \
+          --env WORKSPACE=/github/workspace \
+          --env PROJECT_SRC_PATH=/github/workspace/zstd \
+          --env REPOSITORY=zstd \
+          --env GIT_BASE_COMMIT=49cf51799ea051457f57243527aa2058f999f005 \
+          --env OSS_FUZZ_PROJECT_NAME=zstd \
+          --env LANGUAGE=c++ \
+          --env SANITIZER \
+          --env ARCHITECTURE=x86_64 \
+          --env DRY_RUN=false \
+          --env BAD_BUILD_CHECK=true \
+          --env KEEP_UNAFFECTED_FUZZ_TARGETS=false \
+          --env LOW_DISK_SPACE=True \
+          --env CIFUZZ_DEBUG=True \
+          --env OUTPUT_SARIF=false \
+          --env GIT_CONFIG_COUNT=1 \
+          --env GIT_CONFIG_KEY_0=safe.directory \
+          --env GIT_CONFIG_VALUE_0=/github/workspace/zstd \
+          dictionary-cifuzz-build 2>&1 | tee cifuzz-build.log
+        grep -F 'InternalGeneric: preparing for fuzzer build.' cifuzz-build.log
+        grep -F 'repo_dir: /github/workspace/zstd.' cifuzz-build.log
+        if grep -F 'Using current repo state.' cifuzz-build.log; then
+          exit 1
+        fi
+        sha256sum -c source-sha256.txt
+    - name: Run fuzzers (${{ matrix.sanitizer }})
+      uses: google/oss-fuzz/infra/cifuzz/actions/run_fuzzers@dec0ef9471729f77ed49c5cf0ff818538f616add
+      with:
+        oss-fuzz-project-name: zstd
+        fuzz-seconds: 600
+        dry-run: false
+        sanitizer: ${{ matrix.sanitizer }}
+    - name: Upload source evidence
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: source-${{ matrix.sanitizer }}
+        path: |
+          source-sha256.txt
+          source-commit.txt
+          cifuzz-build.log
+    - name: Upload crash
+      if: failure() && steps.build.outcome == 'success'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: ${{ matrix.sanitizer }}-artifacts
+        path: ./out/artifacts
