@@ -1,0 +1,70 @@
+name: dictionary-binary-size
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  size:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        revision:
+          - 49cf51799ea051457f57243527aa2058f999f005
+          - ac6e2475a827ad0e373bd3844f0e2df01c781b5d
+    env:
+      REPORT_DIR: ${{ runner.temp }}/size-report-${{ matrix.revision }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ matrix.revision }}
+    - name: Measure all original size configurations
+      run: |
+        python3 - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+        import subprocess
+        import sys
+
+        directory = Path(os.environ['REPORT_DIR'])
+        directory.mkdir()
+        report = {
+            'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+            'compiler': subprocess.check_output(['cc', '--version'], text=True),
+            'linker': subprocess.check_output(['ld', '--version'], text=True),
+            'configurations': [],
+        }
+        configurations = [
+            ('default', [], 1100000),
+            ('decompress', ['ZSTD_LIB_COMPRESSION=0', 'ZSTD_LIB_DICTBUILDER=0'], 400000),
+            ('minify', ['ZSTD_LIB_MINIFY=1'], 300000),
+            ('minify-decompress', ['ZSTD_LIB_MINIFY=1', 'ZSTD_LIB_COMPRESSION=0', 'ZSTD_LIB_DICTBUILDER=0'], 80000),
+        ]
+        failed = False
+        for name, options, limit in configurations:
+            with (directory / (name + '.log')).open('w') as log:
+                subprocess.run(['make', 'clean'], stdout=log, stderr=subprocess.STDOUT, check=True)
+                build = subprocess.run(['make', '-j2', '-C', 'lib', 'libzstd', *options], stdout=log, stderr=subprocess.STDOUT)
+            result = {'name': name, 'options': options, 'limit': limit, 'build_exit': build.returncode}
+            if build.returncode == 0:
+                result['bytes'] = Path('lib/libzstd.so').stat().st_size
+                check = subprocess.run([sys.executable, 'tests/check_size.py', 'lib/libzstd.so', str(limit)], capture_output=True, text=True)
+                result['check_exit'] = check.returncode
+                result['check_output'] = check.stdout + check.stderr
+                failed |= check.returncode != 0
+            else:
+                failed = True
+            report['configurations'].append(result)
+        (directory / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+        print(json.dumps(report, indent=2))
+        sys.exit(failed)
+        PY
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      if: always()
+      with:
+        name: dictionary-size-${{ matrix.revision }}
+        path: ${{ env.REPORT_DIR }}
